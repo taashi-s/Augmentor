@@ -28,6 +28,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from tqdm import tqdm
 from PIL import Image
+import cv2
+import shutil
+import glob
 
 
 class Pipeline(object):
@@ -1738,3 +1741,254 @@ class DataFramePipeline(Pipeline):
                                                                   output_directory)
 
         self._check_images(output_directory)
+
+
+class BBoxPipeline(Pipeline):
+    """
+    BBoxPipeline class used when ground truth data type is Bounding box.
+    """
+    def __init__(self, source_directory=None,
+                 output_directory="output",
+                 save_format=None,
+                 ground_truth_directory=None,
+                 ground_truth_tmp_directory=None,
+                 with_normalize=True):
+        super(BBoxPipeline, self).__init__(source_directory=source_directory,
+                                           output_directory=output_directory,
+                                           save_format=save_format)
+        self.mkdir_flg = False
+        self.ground_truth_directory = None
+        self.ground_truth_tmp_directory = None
+        self.ground_truth(ground_truth_directory,
+                          ground_truth_tmp_directory=ground_truth_tmp_directory,
+                          with_normalize=with_normalize)
+
+
+    def __del__(self):
+        if self.mkdir_flg and self.ground_truth_tmp_directory is not None:
+            print('@@@ delete ground_truth_tmp_directory :', self.ground_truth_tmp_directory)
+            #shutil.rmtree(self.ground_truth_tmp_directory)
+
+
+    def ground_truth(self,
+                     ground_truth_directory,
+                     ground_truth_tmp_directory=None,
+                     with_normalize=True):
+        """
+        Specifies a directory containing corresponding images that
+        constitute respective ground truth images for the images
+        in the current pipeline.
+
+        This function will search the directory specified by
+        :attr:`ground_truth_directory` and will associate each ground truth
+        data with the images in the pipeline by file name.
+
+        Therefore, an image titled ``cat321.jpg`` will match with the
+        image ``cat321.npy`` in the :attr:`ground_truth_directory`.
+        The function respects each image's label, therefore the image
+        named ``cat321.jpg`` with the label ``cat`` will match the data
+        ``cat321.npy`` in the subdirectory ``cat`` relative to
+        :attr:`ground_truth_directory`.
+
+        npy shape is (box_num, ((label_count), (4))).
+        That means data is [(one_hot_label, [xmin, ymin, xmax, ymax]), ...].
+
+        :param ground_truth_directory: A directory containing the
+         ground truth data that correspond to the images in the
+         current pipeline.
+        :type ground_truth_directory: String
+        :return: None.
+        """
+
+        num_of_ground_truth_images_added = 0
+
+        # Progress bar
+        progress_bar = tqdm(total=len(self.augmentor_images), desc='Processing', unit=' files', leave=False)
+
+        if ground_truth_directory is None:
+            return None
+
+        if ground_truth_tmp_directory is None:
+            ground_truth_tmp_directory = os.path.join(ground_truth_directory, '.gt_temp')
+
+        if not os.path.exists(ground_truth_tmp_directory):
+            os.mkdir(ground_truth_tmp_directory)
+            if not os.path.exists(ground_truth_tmp_directory):
+                print('Faild tp mkdir gt_tmp dir')
+                return None
+            self.mkdir_flg = True
+
+        self.ground_truth_directory = ground_truth_directory
+        self.ground_truth_tmp_directory = ground_truth_tmp_directory
+        self.with_normalize = with_normalize
+
+        if len(self.class_labels) == 1:
+            for augmentor_image_idx in range(len(self.augmentor_images)):
+                ground_truth_image_path = self._create_ground_truth_image(ground_truth_directory,
+                                                                           ground_truth_tmp_directory,
+                                                                           augmentor_image_idx)
+                if os.path.isfile(ground_truth_image_path):
+                    self.augmentor_images[augmentor_image_idx].ground_truth = ground_truth_image_path
+                    num_of_ground_truth_images_added += 1
+        else:
+            # TODO : Add processing
+            pass
+            #for i in range(len(self.class_labels)):
+            #    for augmentor_image_idx in range(len(self.augmentor_images)):
+            #        ground_truth_image = os.path.join(ground_truth_directory,
+            #                                          self.augmentor_images[augmentor_image_idx].class_label,
+            #                                          self.augmentor_images[augmentor_image_idx].image_file_name)
+            #        if os.path.isfile(ground_truth_image):
+            #            if self.augmentor_images[augmentor_image_idx].class_label == self.class_labels[i][0]:
+            #                # Check files are the same size. There may be a better way to do this.
+            #                original_image_dimensions = \
+            #                    Image.open(self.augmentor_images[augmentor_image_idx].image_path).size
+            #                ground_image_dimensions = Image.open(ground_truth_image).size
+            #                if original_image_dimensions == ground_image_dimensions:
+            #                    self.augmentor_images[augmentor_image_idx].ground_truth = ground_truth_image
+            #                    num_of_ground_truth_images_added += 1
+            #                    progress_bar.update(1)
+
+        progress_bar.close()
+
+        # May not be required after all, check later.
+        if num_of_ground_truth_images_added != 0:
+            self.process_ground_truth_images = True
+
+        print("%s ground truth data found." % num_of_ground_truth_images_added)
+
+    def _create_ground_truth_image(self,
+                                    ground_truth_npy_dir,
+                                    ground_truth_img_dir,
+                                    augmentor_image_idx):
+        """
+        label_num <= 256
+        """
+        image_name, _ = os.path.splitext(self.augmentor_images[augmentor_image_idx].image_file_name)
+        org_img_path = self.augmentor_images[augmentor_image_idx].image_path
+        ground_truth_npy_path = os.path.join(ground_truth_npy_dir, image_name + '.npy')
+
+        org_img = cv2.imread(org_img_path)
+        org_img_shape = np.shape(org_img)
+        org_h, org_w = 1, 1
+        if self.with_normalize:
+            org_h, org_w, _ = org_img_shape
+        gt_img = np.zeros((org_img_shape[0], org_img_shape[1], 3))
+
+        ground_truth_npy = np.load(ground_truth_npy_path)
+        if len(ground_truth_npy) != 0:
+            self.npy_label_num = len(ground_truth_npy[0][0])
+            self.gt_color_stride = 255 // len(ground_truth_npy)
+            self.gt_color_mergin = self.gt_color_stride // 2
+            label_colors = [x for x in range(1, 255, self.gt_color_stride)]
+            for k, (one_hot, box) in enumerate(ground_truth_npy):
+                label_idx = np.argmax(one_hot).tolist()
+                box_lt = (int(box[0] * org_w), int(box[1] * org_h))
+                box_rb = (int(box[2] * org_w), int(box[3] * org_h))
+                color = (label_colors[k], 0, label_idx)
+                print(color)
+                cv2.rectangle(gt_img, box_lt, box_rb, color, -1)
+
+        ground_truth_image_path = os.path.join(ground_truth_img_dir, image_name + '.png')
+        cv2.imwrite(ground_truth_image_path, gt_img)
+        return ground_truth_image_path
+
+    def sample(self, n, multi_threaded=True):
+        """
+        Generate :attr:`n` number of samples from the current pipeline.
+
+        This function samples from the pipeline, using the original images
+        defined during instantiation. All images generated by the pipeline
+        are by default stored in an ``output`` directory, relative to the
+        path defined during the pipeline's instantiation.
+
+        By default, Augmentor will use multi-threading to increase the speed
+        of processing the images. However, this may slow down some
+        operations if the images are very small. Set :attr:`multi_threaded`
+        to ``False`` if slowdown is experienced.
+
+        :param n: The number of new samples to produce.
+        :type n: Integer
+        :param multi_threaded: Whether to use multi-threading to process the
+         images. Defaults to ``True``.
+        :type multi_threaded: Boolean
+        :return: None
+        """
+        if len(self.augmentor_images) == 0:
+            raise IndexError("There are no images in the pipeline. "
+                             "Add a directory using add_directory(), "
+                             "pointing it to a directory containing images.")
+
+        if len(self.operations) == 0:
+            raise IndexError("There are no operations associated with this pipeline.")
+
+        if n == 0:
+            augmentor_images = self.augmentor_images
+        else:
+            augmentor_images = [random.choice(self.augmentor_images) for _ in range(n)]
+
+        if multi_threaded:
+            # TODO: Restore the functionality from the pre-multi-thread code above.
+            with tqdm(total=len(augmentor_images), desc="Executing Pipeline", unit=" Samples") as progress_bar:
+                with ThreadPoolExecutor(max_workers=None) as executor:
+                    for result in executor.map(self, augmentor_images):
+                        progress_bar.set_description("Processing %s" % result)
+                        progress_bar.update(1)
+        else:
+            with tqdm(total=len(augmentor_images), desc="Executing Pipeline", unit=" Samples") as progress_bar:
+                for k, augmentor_image in enumerate(augmentor_images):
+                    self._execute(augmentor_image)
+                    self._create_augmentation_ground_truth_npy(augmentor_image, tmp_c=k)
+                    progress_bar.set_description("Processing %s" % os.path.basename(augmentor_image.image_path))
+                    progress_bar.update(1)
+
+    def _create_augmentation_ground_truth_npy(self, augmentor_image, save_to_disk=True, tmp_c=0):
+        gt_file_key = "*" + "_groundtruth_" + "*" + "_" + os.path.basename(augmentor_image.image_path) + "_" + "*.png"
+        gt_files = glob.glob(os.path.join(augmentor_image.output_directory, gt_file_key))
+        if len(gt_files) < 1:
+            return np.array([])
+
+        boxes_list = []
+        for i, gt_file in enumerate(gt_files):
+            img = cv2.imread(gt_file)
+            if img is None:
+                print('img is None : ', gt_file)
+                continue
+            boxes = []
+
+            #colors = list(set((np.ravel(img[:, :, 0])).tolist()))
+            colors = [x for x in range(1, 255, self.gt_color_stride)]
+            colors.sort()
+            #for i, color in enumerate(colors[1:]):
+            for k, color in enumerate(colors):
+                img_tmp = img.copy()
+                color_min = max(1, color - self.gt_color_mergin)
+                color_max = min(color + self.gt_color_mergin, 255)
+                target_ids = np.where((img[:, :, 0] >= color_min)
+                                    & (img[:, :, 0] <= color_max), True, False)
+                img_tmp[target_ids] = 255
+                not_target_ids = np.logical_not(target_ids)
+                img_tmp[not_target_ids] = 0
+                #cv2.imwrite('./test_data/tmp/%03d_i%03d_k%03d(%03d).png' % (tmp_c, i, k, color), img_tmp)
+                gray_img = cv2.cvtColor(img_tmp, cv2.COLOR_BGR2GRAY)
+                _, contours, _ = cv2.findContours(gray_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+                for k, contour in enumerate(contours):
+                    x, y, w, h = cv2.boundingRect(contour)
+                    box = [x, y, x+w, y+h]
+                    label_id = img[contour[0, 0, 1], contour[0, 0, 0], 2]
+                    box = np.array(box, dtype=np.float32)
+                    if self.with_normalize:
+                        h, w, _ = np.shape(img)
+                        box /= [w, h, w, h]
+                    one_hot = np.zeros(self.npy_label_num)
+                    one_hot[label_id] = 1
+                    boxes.append(np.array([one_hot, box]))
+            boxes = np.array(boxes)
+            if save_to_disk:
+                fpath, _ = os.path.splitext(gt_file)
+                np.save(fpath + '.npy', boxes)
+            os.remove(gt_file)
+            boxes_list.append(boxes)
+        return boxes_list
+
+
